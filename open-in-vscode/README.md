@@ -1,4 +1,4 @@
-# paseo-open-vscode
+# open-in-vscode
 
 A [Paseo](https://paseo.sh) plugin that adds an **Open in VS Code** button to the workspace header.
 
@@ -7,7 +7,7 @@ Pressing it launches `code <workspace directory>` on the daemon machine. On WSL 
 ## Install
 
 ```bash
-paseo plugin add tskimmett/paseo-open-vscode
+paseo plugin add tskimmett/paseo-plugins:open-in-vscode
 ```
 
 Or from a local checkout:
@@ -15,7 +15,7 @@ Or from a local checkout:
 ```bash
 npm install
 npm run typecheck
-paseo plugin install /absolute/path/to/paseo-open-vscode
+paseo plugin install /absolute/path/to/paseo-plugins/open-in-vscode
 ```
 
 Plugins must be enabled on the daemon (Settings → Plugins → Enable plugins).
