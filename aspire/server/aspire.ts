@@ -1,9 +1,9 @@
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { AppHost } from "../shared/aspire";
-import { aspireStatusRpc, detectAspireRpc, launchAspireRpc, stopAspireRpc } from "../shared/aspire";
+import { aspireResourcesRpc, aspireStatusRpc, detectAspireRpc, launchAspireRpc, stopAspireRpc } from "../shared/aspire";
 import { findAppHost } from "./detect";
-import { getStatus, launch, refresh, stop } from "./process";
+import { describeResources, getStatus, launch, refresh, stop } from "./process";
 
 const DETECT_CACHE_MS = 15_000;
 const detectCache = new Map<string, { at: number; directory: string; appHost: AppHost | null }>();
@@ -39,7 +39,7 @@ export async function launchAspire({ workspaceId }: RpcInput<typeof launchAspire
 	if (!appHost) throw new Error("No Aspire app host found in this workspace");
 	const current = await refresh(workspaceId, directory, appHost);
 	if (current.state !== "idle") return current;
-	return launch(workspaceId, appHost);
+	return launch(workspaceId, directory, appHost);
 }
 
 export async function aspireStatus({ workspaceId }: RpcInput<typeof aspireStatusRpc>, context: PluginHandlerContext) {
@@ -51,4 +51,8 @@ export async function aspireStatus({ workspaceId }: RpcInput<typeof aspireStatus
 
 export async function stopAspire({ workspaceId }: RpcInput<typeof stopAspireRpc>) {
 	return stop(workspaceId);
+}
+
+export async function aspireResources({ workspaceId }: RpcInput<typeof aspireResourcesRpc>) {
+	return describeResources(workspaceId);
 }

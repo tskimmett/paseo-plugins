@@ -4,15 +4,15 @@ import { readFile, readdir, readlink, stat } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import type { AppHost, AspireStatus } from "../shared/aspire";
-import { IDLE_STATUS } from "../shared/aspire";
+import type { AppHost, AspireResource, AspireResources, AspireStatus } from "../shared/aspire";
+import { EMPTY_RESOURCES, IDLE_STATUS } from "../shared/aspire";
 
 type Instance = {
 	workspaceId: string;
 	appHost: AppHost;
 	pid: number;
 	pgid: number;
-	source: "plugin" | "external";
+	source: "plugin" | "script" | "external";
 	startedAt: string;
 	dashboardUrl: string | null;
 	dashboardUrlKind: "login" | "fallback" | null;
@@ -49,9 +49,14 @@ const ESC = String.fromCharCode(27);
 const ANSI = new RegExp(`${ESC}\\[[0-9;]*[A-Za-z]|${ESC}\\][^\\x07${ESC}]*(?:\\x07|${ESC}\\\\)`, "g");
 const TAIL_INTERVAL_MS = 500;
 const STOP_GRACE_MS = 8_000;
+const SCRIPT_NAME = "aspire";
+const SCRIPT_PENDING_MS = 120_000;
+const RESOURCES_TTL_MS = 2_000;
 
 const instances = new Map<string, Instance>();
 const errors = new Map<string, string>();
+const scriptLaunches = new Map<string, string>();
+const resourceCache = new Map<string, { at: number; result: AspireResources; inflight: Promise<AspireResources> | null }>();
 const stateDir = join(homedir(), ".paseo", "plugin-state", "aspire");
 const stateFile = join(stateDir, "state.json");
 const logDir = join(stateDir, "logs");
@@ -63,10 +68,14 @@ export function stateLocation() {
 export function getStatus(workspaceId: string): AspireStatus {
 	const instance = instances.get(workspaceId);
 	if (!instance || instance.exited) {
+		const pendingSince = scriptLaunches.get(workspaceId);
+		if (pendingSince && Date.now() - Date.parse(pendingSince) < SCRIPT_PENDING_MS) {
+			return { state: "starting", source: "script", pid: null, dashboardUrl: null, startedAt: pendingSince, error: null };
+		}
 		return { ...IDLE_STATUS, error: errors.get(workspaceId) ?? null };
 	}
 	return {
-		state: instance.dashboardUrl || instance.source === "external" ? "running" : "starting",
+		state: instance.dashboardUrl || instance.source !== "plugin" ? "running" : "starting",
 		source: instance.source,
 		pid: instance.pid,
 		dashboardUrl: instance.dashboardUrl,
@@ -75,14 +84,83 @@ export function getStatus(workspaceId: string): AspireStatus {
 	};
 }
 
+export async function describeResources(workspaceId: string): Promise<AspireResources> {
+	const instance = instances.get(workspaceId);
+	if (!instance || instance.exited) {
+		resourceCache.delete(workspaceId);
+		return EMPTY_RESOURCES;
+	}
+	if (!(await hasAspireCli())) {
+		return { ...EMPTY_RESOURCES, error: "Aspire CLI not found on the daemon; resource list unavailable" };
+	}
+	const cached = resourceCache.get(workspaceId);
+	if (cached?.inflight) return cached.inflight;
+	if (cached && Date.now() - cached.at < RESOURCES_TTL_MS) return cached.result;
+	const inflight = runDescribe(instance, cached?.result ?? EMPTY_RESOURCES).then((result) => {
+		resourceCache.set(workspaceId, { at: Date.now(), result, inflight: null });
+		return result;
+	});
+	resourceCache.set(workspaceId, { at: cached?.at ?? 0, result: cached?.result ?? EMPTY_RESOURCES, inflight });
+	return inflight;
+}
+
+async function runDescribe(instance: Instance, previous: AspireResources): Promise<AspireResources> {
+	const target = instance.appHost.kind === "csproj" ? instance.appHost.projectPath : instance.appHost.directory;
+	const result = await runCapture(
+		"aspire",
+		["describe", "--non-interactive", "--nologo", "--format", "json", "--apphost", target],
+		instance.appHost.directory,
+	);
+	const start = result.stdout.indexOf("{");
+	if (start >= 0) {
+		try {
+			const parsed = JSON.parse(result.stdout.slice(start)) as { resources?: RawResource[] };
+			const resources = (parsed.resources ?? []).map(toResource).sort((a, b) => a.displayName.localeCompare(b.displayName));
+			return { resources, updatedAt: new Date().toISOString(), error: null };
+		} catch {}
+	}
+	const message =
+		`${result.stderr}\n${result.stdout}`
+			.replace(ANSI, "")
+			.split("\n")
+			.map((line) => line.replace(/^[^\w]+/, "").trim())
+			.filter((line) => line && !/^See logs at/i.test(line) && !/AppHosts?\.\.\.$/i.test(line))
+			.pop() ?? `aspire describe exited with ${result.code ?? "signal"}`;
+	return { ...previous, error: message };
+}
+
+type RawResource = {
+	name?: string;
+	displayName?: string;
+	resourceType?: string;
+	state?: string | null;
+	healthStatus?: string | null;
+	urls?: { name?: string; url?: string; isInternal?: boolean }[];
+};
+
+function toResource(raw: RawResource): AspireResource {
+	const name = raw.name ?? "";
+	return {
+		name,
+		displayName: raw.displayName ?? name,
+		type: raw.resourceType ?? "",
+		state: raw.state ?? null,
+		health: raw.healthStatus ?? null,
+		urls: (raw.urls ?? [])
+			.filter((entry) => entry.url && !entry.isInternal)
+			.map((entry) => ({ name: entry.name ?? "default", url: entry.url as string })),
+	};
+}
+
 export function hasInstance(workspaceId: string) {
 	const instance = instances.get(workspaceId);
 	return Boolean(instance && !instance.exited);
 }
 
-export async function launch(workspaceId: string, appHost: AppHost): Promise<AspireStatus> {
+export async function launch(workspaceId: string, workspaceDirectory: string, appHost: AppHost): Promise<AspireStatus> {
 	if (hasInstance(workspaceId)) return getStatus(workspaceId);
 	errors.delete(workspaceId);
+	if (await hasWorkspaceScript(workspaceDirectory)) return launchViaScript(workspaceId, workspaceDirectory, appHost);
 	mkdirSync(logDir, { recursive: true });
 	const logFile = join(logDir, `${workspaceId}.log`);
 	writeFileSync(logFile, "");
@@ -132,8 +210,11 @@ export async function launch(workspaceId: string, appHost: AppHost): Promise<Asp
 
 export async function stop(workspaceId: string): Promise<AspireStatus> {
 	const instance = instances.get(workspaceId);
+	scriptLaunches.delete(workspaceId);
 	if (!instance || instance.exited) return getStatus(workspaceId);
-	if (instance.source === "external" && (await hasAspireCli())) {
+	if (instance.source === "script") {
+		await runQuiet("paseo", ["script", "stop", SCRIPT_NAME, "--workspace", workspaceId], instance.appHost.directory);
+	} else if (instance.source === "external" && (await hasAspireCli())) {
 		await runQuiet("aspire", ["stop", "--non-interactive", "--nologo", "--apphost", instance.appHost.projectPath], instance.appHost.directory);
 	}
 	signalGroup(instance, "SIGTERM");
@@ -157,6 +238,7 @@ export async function refresh(workspaceId: string, workspaceDirectory: string, a
 	const external = await findExternal(workspaceDirectory, appHost);
 	if (external) {
 		external.workspaceId = workspaceId;
+		if (scriptLaunches.has(workspaceId)) external.source = "script";
 		instances.set(workspaceId, external);
 		await discoverExternalUrl(external);
 		startTailer(external);
@@ -203,6 +285,26 @@ export function shutdown() {
 		instance.tailer = null;
 	}
 	persist();
+}
+
+async function hasWorkspaceScript(workspaceDirectory: string) {
+	try {
+		const config = JSON.parse(await readFile(join(workspaceDirectory, "paseo.json"), "utf8")) as { scripts?: Record<string, { type?: string }> };
+		return config.scripts?.[SCRIPT_NAME]?.type === "service";
+	} catch {
+		return false;
+	}
+}
+
+async function launchViaScript(workspaceId: string, workspaceDirectory: string, appHost: AppHost): Promise<AspireStatus> {
+	console.log(`[aspire] starting workspace script "${SCRIPT_NAME}" for ${workspaceId}`);
+	const result = await runCapture("paseo", ["script", "start", SCRIPT_NAME, "--workspace", workspaceId], workspaceDirectory);
+	if (result.code !== 0) {
+		errors.set(workspaceId, `paseo script start ${SCRIPT_NAME} failed: ${(result.stderr || result.stdout).trim().split("\n").pop() ?? `exit ${result.code}`}`);
+		return getStatus(workspaceId);
+	}
+	scriptLaunches.set(workspaceId, new Date().toISOString());
+	return refresh(workspaceId, workspaceDirectory, appHost);
 }
 
 async function buildCommand(appHost: AppHost) {
@@ -326,6 +428,7 @@ function onExit(instance: Instance, code: number | null, signal: NodeJS.Signals 
 }
 
 function finish(instance: Instance, error: string | null) {
+	resourceCache.delete(instance.workspaceId);
 	if (instance.exited) return;
 	instance.exited = true;
 	if (instance.tailer) clearInterval(instance.tailer);
@@ -474,10 +577,13 @@ async function discoverExternalUrl(instance: Instance) {
 	if (instance.logFile) await tail(instance);
 	if (hasLoginUrl(instance)) return;
 	const processes = await listProcesses();
-	for (const info of collectDescendants(processes, instance.pid)) {
+	const tree = new Set([instance.pid, ...collectDescendants(processes, instance.pid).map((info) => info.pid)]);
+	for (const info of processes) {
 		if (!info.args.some((arg) => /Aspire\.Dashboard(\.dll)?$/.test(arg))) continue;
 		const env = await readEnviron(info.pid);
-		const url = env.ASPNETCORE_URLS?.split(";")[0];
+		const cliPid = Number(env.ASPIRE_CLI_PID);
+		if (!tree.has(info.pid) && !(cliPid && tree.has(cliPid))) continue;
+		const url = (env.DASHBOARD__FRONTEND__PUBLICURL ?? env.ASPNETCORE_URLS)?.split(";")[0];
 		const token = env.DASHBOARD__FRONTEND__BROWSERTOKEN;
 		if (url && token) {
 			setDashboardUrl(instance, `${url.replace(/\/$/, "")}/login?t=${token}`, "login");
@@ -520,6 +626,25 @@ async function readEnviron(pid: number) {
 		}
 	} catch {}
 	return env;
+}
+
+function runCapture(bin: string, args: string[], cwd: string) {
+	return new Promise<{ code: number | null; stdout: string; stderr: string }>((done) => {
+		let stdout = "";
+		let stderr = "";
+		const child = spawn(bin, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+		child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+		child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+		child.once("error", (error) => {
+			clearTimeout(timer);
+			done({ code: null, stdout, stderr: stderr || error.message });
+		});
+		child.once("exit", (code) => {
+			clearTimeout(timer);
+			done({ code, stdout, stderr });
+		});
+	});
 }
 
 function runQuiet(bin: string, args: string[], cwd: string) {
