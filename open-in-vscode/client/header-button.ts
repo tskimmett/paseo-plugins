@@ -32,15 +32,26 @@ export function contributeHeaderButtons(client: PluginClientContext) {
 		buttons.delete(workspaceId);
 	};
 
-	const unsubscribe = client.paseo.workspaces.subscribe((update) => {
-		if (update.kind === "upsert") register(update.workspace.id);
-		else if (update.kind === "remove") unregister(update.id);
-	});
+	let release: (() => Promise<void>) | null = null;
 
 	void client.paseo.workspaces
 		.list({ subscribe: {} })
-		.then(({ entries }) => {
-			for (const workspace of entries) register(workspace.id);
+		.then(({ subscription }) => {
+			release = () => subscription.release();
+			if (stopped) return void release();
+			subscription.subscribe({
+				snapshot: ({ entries }) => {
+					const current = new Set(entries.map((workspace) => workspace.id));
+					for (const workspaceId of [...buttons.keys()]) if (!current.has(workspaceId)) unregister(workspaceId);
+					for (const workspaceId of current) register(workspaceId);
+				},
+				update: (message) => {
+					if (message.type !== "workspace_update") return;
+					const update = message.payload;
+					if (update.kind === "upsert") register(update.workspace.id);
+					else if (update.kind === "remove") unregister(update.id);
+				},
+			});
 		})
 		.catch((error) => {
 			if (!stopped) console.error("[open-in-vscode] workspace list failed", error);
@@ -48,7 +59,7 @@ export function contributeHeaderButtons(client: PluginClientContext) {
 
 	return () => {
 		stopped = true;
-		unsubscribe();
+		void release?.();
 		for (const button of buttons.values()) button.remove();
 		buttons.clear();
 	};

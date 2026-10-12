@@ -264,17 +264,31 @@ export function contributeHeaderButtons(client: PluginClientContext) {
 		entries.delete(workspaceId);
 	};
 
-	const unsubscribe = client.paseo.workspaces.subscribe((update) => {
-		if (update.kind === "upsert") {
-			applyScripts(update.workspace.id, update.workspace.scripts);
-			void sync(update.workspace.id, false, update.workspace.scripts);
-		} else if (update.kind === "remove") unregister(update.id);
-	});
+	let release: (() => Promise<void>) | null = null;
 
 	void client.paseo.workspaces
 		.list({ subscribe: {} })
-		.then(({ entries: workspaces }) => {
-			for (const workspace of workspaces) void sync(workspace.id, true, workspace.scripts);
+		.then(({ subscription }) => {
+			release = () => subscription.release();
+			if (stopped) return void release();
+			subscription.subscribe({
+				snapshot: ({ entries: workspaces }) => {
+					const current = new Set(workspaces.map((workspace) => workspace.id));
+					for (const workspaceId of [...entries.keys()]) if (!current.has(workspaceId)) unregister(workspaceId);
+					for (const workspace of workspaces) {
+						applyScripts(workspace.id, workspace.scripts);
+						void sync(workspace.id, true, workspace.scripts);
+					}
+				},
+				update: (message) => {
+					if (message.type !== "workspace_update") return;
+					const update = message.payload;
+					if (update.kind === "upsert") {
+						applyScripts(update.workspace.id, update.workspace.scripts);
+						void sync(update.workspace.id, false, update.workspace.scripts);
+					} else if (update.kind === "remove") unregister(update.id);
+				},
+			});
 		})
 		.catch((error) => {
 			if (!stopped) console.error("[aspire] workspace list failed", error);
@@ -282,7 +296,7 @@ export function contributeHeaderButtons(client: PluginClientContext) {
 
 	return () => {
 		stopped = true;
-		unsubscribe();
+		void release?.();
 		for (const workspaceId of [...entries.keys()]) unregister(workspaceId);
 	};
 }
