@@ -236,7 +236,15 @@ function LinkRow({
 			})}
 		>
 			<View style={{ flexShrink: 1, flexGrow: 1 }}>
-				<Text numberOfLines={1} style={{ color: disabled ? theme.colors.foregroundMuted : theme.colors.accent, fontSize: 13, fontWeight: emphasized ? "600" : "400" }}>
+				<Text
+					numberOfLines={1}
+					style={{
+						color: disabled ? theme.colors.foregroundMuted : theme.colors.foreground,
+						fontSize: 13,
+						fontWeight: emphasized ? "600" : "400",
+						textDecorationLine: disabled ? "none" : "underline",
+					}}
+				>
 					{title}
 				</Text>
 				{subtitle ? (
@@ -245,7 +253,7 @@ function LinkRow({
 					</Text>
 				) : null}
 			</View>
-			{!disabled ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>↗</Text> : null}
+			{!disabled ? <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>↗</Text> : null}
 		</Pressable>
 	);
 }

@@ -1,5 +1,6 @@
+import { openExternalUrl } from "@getpaseo/plugin/client";
 import type { PluginButton, PluginButtonContentProps, PluginButtonRegistration, PluginClientContext } from "@getpaseo/plugin/client";
-import { Linking, Platform } from "react-native";
+import { Platform } from "react-native";
 import type { ComponentType } from "react";
 import type { AspireResources, AspireStatus } from "../shared/aspire";
 import { IDLE_STATUS, aspireResourcesRpc, aspireStatusRpc, detectAspireRpc, launchAspireRpc, stopAspireRpc } from "../shared/aspire";
@@ -27,7 +28,6 @@ type Entry = {
 	cancelPoll: (() => void) | null;
 	detectedAt: number;
 	launchedHere: boolean;
-	openedUrl: string | null;
 	busy: boolean;
 	version: number;
 	listeners: Set<() => void>;
@@ -75,7 +75,6 @@ export function contributeHeaderButtons(client: PluginClientContext) {
 				cancelPoll: null,
 				detectedAt: 0,
 				launchedHere: false,
-				openedUrl: null,
 				busy: false,
 				version: 0,
 				listeners: new Set(),
@@ -93,12 +92,10 @@ export function contributeHeaderButtons(client: PluginClientContext) {
 
 	const resolveFor = (workspaceId: string, url: string | null) => resolveLinkTarget(url, entries.get(workspaceId)?.scripts ?? []);
 
-	const targetFor = (workspaceId: string, status = entries.get(workspaceId)?.status ?? IDLE_STATUS) => resolveFor(workspaceId, status.dashboardUrl);
-
 	const openLink = async (workspaceId: string, url: string) => {
 		const target = resolveFor(workspaceId, url);
 		if (target.url === null) throw new Error(target.reason);
-		await Linking.openURL(target.url);
+		await openExternalUrl(target.url);
 	};
 
 	const refreshResources = (workspaceId: string) => {
@@ -159,16 +156,6 @@ export function contributeHeaderButtons(client: PluginClientContext) {
 		};
 	};
 
-	const maybeAutoOpen = (workspaceId: string, entry: Entry) => {
-		if (!entry.launchedHere || !entry.status.dashboardUrl || entry.openedUrl === entry.status.dashboardUrl) return;
-		const target = targetFor(workspaceId, entry.status);
-		if (target.url === null) return;
-		entry.openedUrl = entry.status.dashboardUrl;
-		void Linking.openURL(target.url).catch((error) => {
-			console.error("[aspire] failed to open dashboard", error);
-		});
-	};
-
 	const applyStatus = (workspaceId: string, status: AspireStatus) => {
 		const entry = entries.get(workspaceId);
 		if (!entry || !entry.registration) return;
@@ -176,13 +163,11 @@ export function contributeHeaderButtons(client: PluginClientContext) {
 		entry.status = status;
 		if (status.state === "idle") {
 			entry.launchedHere = false;
-			entry.openedUrl = null;
 			if (entry.resources !== null) {
 				entry.resources = null;
 				notify(entry);
 			}
 		} else {
-			maybeAutoOpen(workspaceId, entry);
 			if (Date.now() - entry.resourcesAt >= RESOURCE_BACKGROUND_MS) void refreshResources(workspaceId);
 		}
 		const changed =
@@ -205,11 +190,9 @@ export function contributeHeaderButtons(client: PluginClientContext) {
 		if (!entry) return;
 		const next = scripts ?? [];
 		const unchanged = routeKey(entry.scripts) === routeKey(next);
-		const before = targetFor(workspaceId).url;
 		entry.scripts = next;
 		if (unchanged) return;
 		if (!entry.registration || entry.status.state === "idle") return;
-		if (targetFor(workspaceId).url !== before) maybeAutoOpen(workspaceId, entry);
 		notify(entry);
 	};
 
@@ -238,7 +221,6 @@ export function contributeHeaderButtons(client: PluginClientContext) {
 	const launch = async (workspaceId: string) => {
 		const entry = entryFor(workspaceId);
 		entry.launchedHere = true;
-		entry.openedUrl = null;
 		try {
 			applyStatus(workspaceId, await client.rpc(launchAspireRpc, { workspaceId }));
 		} catch (error) {

@@ -3,7 +3,7 @@
 A [Paseo](https://paseo.sh) plugin that adds an **Aspire** button to the header of every workspace that contains a .NET Aspire app host.
 
 - **Idle**: pressing the button starts the app host on the daemon machine. It prefers `aspire run` when the Aspire CLI is on the daemon's `PATH` and falls back to `dotnet run --project <apphost.csproj>`.
-- **Starting / running**: the button opens a popover that shows the app host state, a **Dashboard** link, every resource reported by the app host with its state and endpoint URLs, and a **Stop** button. Resource links open directly, without going through the dashboard. The dashboard login URL is parsed from the app host output and opened automatically for the client that pressed the button.
+- **Starting / running**: the button opens a popover that shows the app host state, a **Dashboard** link, every resource reported by the app host with its state and endpoint URLs, and a **Stop** button. Only pressing a link opens a URL; launching the app host does not open one automatically. Resource links open directly, without going through the dashboard.
 
 Paseo shows at most one plugin header button inline on phones and on windows narrower than 1100px (three otherwise); the rest move into the header's overflow menu in registration order. When another plugin such as *Open in VS Code* registers first, the Aspire button lands in that menu and its popover opens as a sub-page of it.
 
@@ -25,7 +25,7 @@ State lives on the daemon:
 
 ## Mobile and remote clients (prototype)
 
-`Linking.openURL` on a phone opens `https://localhost:<port>/…` *on the phone*, so the default flow only works for clients on the daemon machine. The prototype in this tree adds an opt-in path that rides on Paseo's workspace-script service proxy:
+An external URL opener on a phone opens `https://localhost:<port>/…` *on the phone*, so the default flow only works for clients on the daemon machine. The prototype in this tree adds an opt-in path that rides on Paseo's workspace-script service proxy:
 
 1. Add an `aspire` service to the workspace's `paseo.json`. It must bind the dashboard to plain HTTP on the Paseo-assigned port, because the daemon proxy speaks HTTP to upstreams:
 
@@ -47,7 +47,7 @@ Known constraints of this path: the Aspire dashboard falls back to SignalR long 
 
 ## Limitations
 
-- The Paseo plugin SDK (0.8.0) exposes no API for creating a Paseo browser tab; the daemon's browser tab broker is only reachable by agent MCP tools. The dashboard therefore opens through React Native `Linking.openURL`, which is the system browser on desktop/mobile and a new tab in the web app.
+- Paseo 0.9.0 or newer is required. Popovers do not receive `navigation.openBrowser`, so links use `openExternalUrl` from the popover: the system browser on Electron, a new tab in browser web, or the OS URL handler on mobile. For remote workspaces, `localhost` still means the client device.
 - External detection is Linux-only (`/proc`). On other platforms only plugin-launched app hosts are tracked.
 - If several external app hosts exist for the same project (for example stale detached `aspire run` processes), the lowest-PID root process is tracked; **Stop** ends that one and the next poll picks up the remaining one.
 - The dashboard URL for an external app host can only be recovered from its CLI log file or the dashboard process environment. If neither yields a URL, **Open dashboard** stays disabled.
